@@ -1,5 +1,5 @@
 import Dexie, { type Table } from 'dexie';
-import type { DayEntry, HabitTask, TaskCategory } from './types';
+import type { CategoryEntry, DayEntry, HabitTask, TaskCategory } from './types';
 
 const DEFAULT_TASKS: Record<TaskCategory, string[]> = {
   workout: ['5 km / 10,000 steps', '5 Push-ups', '15–20 minutes Boxing', 'Hand Exercises'],
@@ -81,7 +81,7 @@ export async function deleteTaskRecord(taskId: string) {
 }
 
 export async function getDayEntry(date: string) {
-  return db.dayEntries.get(date) ?? null;
+  return (await db.dayEntries.get(date)) ?? null;
 }
 
 export async function getDayEntriesForDates(dates: string[]) {
