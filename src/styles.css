@@ -1,0 +1,27 @@
+export type TaskCategory = 'workout' | 'diet' | 'personal';
+
+export interface HabitTask {
+  id: string;
+  name: string;
+  category: TaskCategory;
+  isDefault: boolean;
+  target?: string;
+  createdAt: string;
+}
+
+export interface CategoryEntry {
+  notes: string;
+  completed: Record<string, boolean>;
+  caloriesBurned?: number;
+  steps?: number;
+  distance?: number;
+  caloriesConsumed?: number;
+  protein?: number;
+}
+
+export interface DayEntry {
+  date: string;
+  workout: CategoryEntry;
+  diet: CategoryEntry;
+  personal: CategoryEntry;
+}
