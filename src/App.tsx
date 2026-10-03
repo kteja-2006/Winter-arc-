@@ -1,98 +1,78 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   addTaskRecord,
+  createEmptyDayEntry,
   deleteTaskRecord,
   getAllDayEntries,
   getDayEntriesForDates,
   getDayEntry,
+  getWeekDates,
   initializeDatabase,
   listTasks,
+  toISODate,
   upsertDayEntry,
   updateTaskRecord,
 } from './db';
 import type { CategoryEntry, DayEntry, HabitTask, TaskCategory } from './types';
 
-const CATEGORY_META: Record<
-  TaskCategory,
-  { title: string; accent: string; icon: string }
-> = {
-  workout: { title: 'Workout', accent: 'cyan', icon: '🏋️' },
-  diet: { title: 'Diet', accent: 'violet', icon: '🥗' },
-  personal: { title: 'Personal', accent: 'amber', icon: '✨' },
+const CATEGORY_META: Record<TaskCategory, { title: string; icon: string }> = {
+  workout: { title: 'Workout', icon: '🏋️' },
+  diet: { title: 'Diet', icon: '🥗' },
+  personal: { title: 'Personal', icon: '✨' },
 };
 
-const DEFAULT_TASKS: Record<TaskCategory, string[]> = {
-  workout: ['5 km / 10,000 steps', '5 Push-ups', '15–20 minutes Boxing', 'Hand Exercises'],
-  diet: ['No Oil', 'No Sugar'],
-  personal: ['No Distractions', 'Night Skincare'],
-};
+const CATEGORY_ORDER: TaskCategory[] = ['workout', 'diet', 'personal'];
 
-const createEmptyCategoryEntry = (): CategoryEntry => ({
-  notes: '',
-  completed: {},
-  caloriesBurned: 0,
-  steps: 0,
-  distance: 0,
-  caloriesConsumed: 0,
-  protein: 0,
-});
-
-const createEmptyDayEntry = (date: string): DayEntry => ({
-  date,
-  workout: createEmptyCategoryEntry(),
-  diet: createEmptyCategoryEntry(),
-  personal: createEmptyCategoryEntry(),
-});
-
-const toISODate = (date: Date) => {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, '0');
-  const day = `${date.getDate()}`.padStart(2, '0');
-  return `${year}-${month}-${day}`;
-};
-
-const parseISODate = (dateString: string) => {
-  const [year, month, day] = dateString.split('-').map(Number);
+const parseISODate = (value: string) => {
+  const [year, month, day] = value.split('-').map(Number);
   return new Date(year, month - 1, day);
 };
 
-const isSameDate = (a: string, b: string) => a === b;
-
-const addDays = (date: Date, days: number) => {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
+const addDays = (date: Date, count: number) => {
+  const result = new Date(date);
+  result.setDate(result.getDate() + count);
+  return result;
 };
 
-const getWeekDates = (dateString: string) => {
-  const date = parseISODate(dateString);
-  const dayIndex = date.getDay();
-  const diffToMonday = dayIndex === 0 ? -6 : 1 - dayIndex;
-  const monday = addDays(date, diffToMonday);
-  return Array.from({ length: 7 }, (_, index) => toISODate(addDays(monday, index)));
-};
-
-const formatWeekdayShort = (dateString: string) =>
-  new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(parseISODate(dateString));
-
-const formatMonthText = (dateString: string) =>
-  new Intl.DateTimeFormat('en-US', { month: 'long' }).format(parseISODate(dateString));
-
-const formatDateText = (dateString: string) =>
-  new Intl.DateTimeFormat('en-US', { day: 'numeric' }).format(parseISODate(dateString));
+const isSameDay = (a: string, b: string) => a === b;
 
 const safeNumber = (value: number | string | undefined) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-const percent = (value: number, total: number) => (total === 0 ? 0 : (value / total) * 100);
+const clampPercent = (value: number) => Math.min(100, Math.max(0, value));
+
+const formatMonth = (value: string) =>
+  new Intl.DateTimeFormat('en-US', { month: 'long' }).format(parseISODate(value));
+
+const formatDay = (value: string) =>
+  new Intl.DateTimeFormat('en-US', { day: 'numeric' }).format(parseISODate(value));
+
+const formatWeekday = (value: string) =>
+  new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(parseISODate(value));
+
+const getDailyPercent = (
+  entry: DayEntry | null | undefined,
+  tasks: HabitTask[],
+) => {
+  if (!entry) return 0;
+  const total = tasks.length;
+  if (total === 0) return 0;
+
+  let done = 0;
+  for (const task of tasks) {
+    if (Boolean(entry[task.category].completed[task.id])) done += 1;
+  }
+
+  return clampPercent((done / total) * 100);
+};
 
 function App() {
   const today = toISODate(new Date());
   const [selectedDate, setSelectedDate] = useState(today);
   const [tasks, setTasks] = useState<HabitTask[]>([]);
-  const [dayEntry, setDayEntry] = useState<DayEntry | null>(null);
+  const [selectedEntry, setSelectedEntry] = useState<DayEntry | null>(null);
   const [weekEntries, setWeekEntries] = useState<Record<string, DayEntry>>({});
   const [allEntries, setAllEntries] = useState<Record<string, DayEntry>>({});
   const [isLoading, setIsLoading] = useState(true);
@@ -106,6 +86,15 @@ function App() {
 
   const weekDates = useMemo(() => getWeekDates(selectedDate), [selectedDate]);
 
+  const categoryTasks = useMemo(
+    () => ({
+      workout: tasks.filter((task) => task.category === 'workout'),
+      diet: tasks.filter((task) => task.category === 'diet'),
+      personal: tasks.filter((task) => task.category === 'personal'),
+    }),
+    [tasks],
+  );
+
   useEffect(() => {
     const bootstrap = async () => {
       await initializeDatabase();
@@ -118,139 +107,99 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!isLoading) {
-      const loadSelected = async () => {
-        const current = await getDayEntry(selectedDate);
-        setDayEntry(current ?? createEmptyDayEntry(selectedDate));
-      };
+    if (isLoading) return;
 
-      const loadWeekMap = async () => {
-        const entries = await getDayEntriesForDates(weekDates);
-        const map: Record<string, DayEntry> = {};
-        entries.forEach((entry) => {
-          map[entry.date] = entry;
-        });
-        setWeekEntries(map);
-      };
+    const loadSelectedDate = async () => {
+      const entry = (await getDayEntry(selectedDate)) ?? createEmptyDayEntry(selectedDate);
+      setSelectedEntry(entry);
+    };
 
-      const loadAll = async () => {
-        const entries = await getAllDayEntries();
-        const map: Record<string, DayEntry> = {};
-        entries.forEach((entry) => {
-          map[entry.date] = entry;
-        });
-        setAllEntries(map);
-      };
+    const loadWeekDates = async () => {
+      const entries = await getDayEntriesForDates(weekDates);
+      const next: Record<string, DayEntry> = {};
+      for (const entry of entries) next[entry.date] = entry;
+      setWeekEntries(next);
+    };
 
-      loadSelected();
-      loadWeekMap();
-      loadAll();
-    }
-  }, [selectedDate, isLoading, weekDates]);
+    const loadAll = async () => {
+      const entries = await getAllDayEntries();
+      const next: Record<string, DayEntry> = {};
+      for (const entry of entries) next[entry.date] = entry;
+      setAllEntries(next);
+    };
 
-  const categoryTaskMap = useMemo(
-    () => ({
-      workout: tasks.filter((task) => task.category === 'workout'),
-      diet: tasks.filter((task) => task.category === 'diet'),
-      personal: tasks.filter((task) => task.category === 'personal'),
-    }),
-    [tasks],
-  );
+    void loadSelectedDate();
+    void loadWeekDates();
+    void loadAll();
+  }, [isLoading, selectedDate, weekDates]);
 
-  const saveDayEntryState = async (entry: DayEntry) => {
+  const persistEntry = async (entry: DayEntry) => {
     await upsertDayEntry(entry);
-    setDayEntry(entry);
-
-    const all = { ...allEntries };
-    all[entry.date] = entry;
-    setAllEntries(all);
-
-    const weekMap = { ...weekEntries };
-    weekMap[entry.date] = entry;
-    setWeekEntries(weekMap);
+    setSelectedEntry(entry);
+    setWeekEntries((current) => ({ ...current, [entry.date]: entry }));
+    setAllEntries((current) => ({ ...current, [entry.date]: entry }));
   };
 
-  const updateSelectedDay = async (
+  const updateSelectedEntry = async (
     category: TaskCategory,
-    updates: Partial<CategoryEntry>,
+    patch: Partial<CategoryEntry>,
   ) => {
-    const current = dayEntry ?? createEmptyDayEntry(selectedDate);
-    const nextEntry: DayEntry = {
-      ...current,
+    const base = selectedEntry ?? createEmptyDayEntry(selectedDate);
+    const next: DayEntry = {
+      ...base,
       [category]: {
-        ...(current[category] ?? createEmptyCategoryEntry()),
-        ...updates,
+        ...(base[category] ?? createEmptyDayEntry(selectedDate)[category]),
+        ...patch,
       },
     };
-    await saveDayEntryState(nextEntry);
+
+    await persistEntry(next);
   };
 
   const toggleTask = async (category: TaskCategory, taskId: string) => {
-    const current = dayEntry ?? createEmptyDayEntry(selectedDate);
-    const prevStatus = Boolean(current[category].completed[taskId]);
-    const nextEntry: DayEntry = {
-      ...current,
+    const base = selectedEntry ?? createEmptyDayEntry(selectedDate);
+    const nextCompleted = { ...base[category].completed };
+    nextCompleted[taskId] = !Boolean(nextCompleted[taskId]);
+
+    const next: DayEntry = {
+      ...base,
       [category]: {
-        ...current[category],
-        completed: {
-          ...current[category].completed,
-          [taskId]: !prevStatus,
-        },
+        ...base[category],
+        completed: nextCompleted,
       },
     };
 
-    await saveDayEntryState(nextEntry);
+    await persistEntry(next);
   };
 
-  const toggleTaskInWeek = async (date: string, category: TaskCategory, taskId: string) => {
-    const current = weekEntries[date] ?? createEmptyDayEntry(date);
-    const prevStatus = Boolean(current[category].completed[taskId]);
-    const nextEntry: DayEntry = {
-      ...current,
+  const toggleWeekTask = async (date: string, category: TaskCategory, taskId: string) => {
+    const base = weekEntries[date] ?? createEmptyDayEntry(date);
+    const nextCompleted = { ...base[category].completed };
+    nextCompleted[taskId] = !Boolean(nextCompleted[taskId]);
+
+    const next: DayEntry = {
+      ...base,
       [category]: {
-        ...current[category],
-        completed: {
-          ...current[category].completed,
-          [taskId]: !prevStatus,
-        },
+        ...base[category],
+        completed: nextCompleted,
       },
     };
 
-    const updatedWeek = { ...weekEntries, [date]: nextEntry };
-    setWeekEntries(updatedWeek);
-    await upsertDayEntry(nextEntry);
+    await upsertDayEntry(next);
+    setWeekEntries((current) => ({ ...current, [date]: next }));
+    setAllEntries((current) => ({ ...current, [date]: next }));
 
-    const nextAll = { ...allEntries };
-    nextAll[date] = nextEntry;
-    setAllEntries(nextAll);
-  };
-
-  const openAddTaskModal = (category: TaskCategory, task?: HabitTask) => {
-    if (task) {
-      setEditingTaskId(task.id);
-      setTaskDraft({
-        name: task.name,
-        category: task.category,
-        target: task.target ?? '',
-      });
-    } else {
-      setEditingTaskId(null);
-      setTaskDraft({
-        name: '',
-        category,
-        target: '',
-      });
+    if (isSameDay(date, selectedDate)) {
+      setSelectedEntry(next);
     }
-
-    setModalOpen(true);
   };
 
-  const handleSaveTask = async () => {
+  const handleTaskSave = async () => {
     const name = taskDraft.name.trim();
     if (!name) return;
 
     if (editingTaskId) {
-      const task = tasks.find((entry) => entry.id === editingTaskId);
+      const task = tasks.find((item) => item.id === editingTaskId);
       if (!task) return;
 
       const updatedTask: HabitTask = {
@@ -261,9 +210,7 @@ function App() {
       };
 
       await updateTaskRecord(updatedTask);
-      setTasks((current) =>
-        current.map((entry) => (entry.id === updatedTask.id ? updatedTask : entry)),
-      );
+      setTasks((current) => current.map((item) => (item.id === updatedTask.id ? updatedTask : item)));
     } else {
       const newTask: HabitTask = {
         id: crypto.randomUUID(),
@@ -288,56 +235,42 @@ function App() {
     setTasks((current) => current.filter((task) => task.id !== taskId));
   };
 
-  const dailyCompletion = useMemo(() => {
-    const allTasks = tasks;
-    const doneCount = allTasks.filter((task) => Boolean(dayEntry?.[task.category].completed[task.id])).length;
+  const selectedSummary = useMemo(() => {
+    const entry = selectedEntry ?? createEmptyDayEntry(selectedDate);
+
     return {
-      total: allTasks.length,
-      done: doneCount,
-      percent: allTasks.length === 0 ? 0 : (doneCount / allTasks.length) * 100,
+      workout: {
+        total: categoryTasks.workout.length,
+        done: categoryTasks.workout.filter((task) => Boolean(entry.workout.completed[task.id])).length,
+        steps: safeNumber(entry.workout.steps),
+        distance: safeNumber(entry.workout.distance),
+        calories: safeNumber(entry.workout.caloriesBurned),
+      },
+      diet: {
+        total: categoryTasks.diet.length,
+        done: categoryTasks.diet.filter((task) => Boolean(entry.diet.completed[task.id])).length,
+        calories: safeNumber(entry.diet.caloriesConsumed),
+        protein: safeNumber(entry.diet.protein),
+      },
+      personal: {
+        total: categoryTasks.personal.length,
+        done: categoryTasks.personal.filter((task) => Boolean(entry.personal.completed[task.id])).length,
+      },
     };
-  }, [dayEntry, tasks]);
-
-  const categorySummaries = useMemo(() => {
-    const categories = Object.keys(CATEGORY_META) as TaskCategory[];
-
-    return categories.map((category) => {
-      const taskList = categoryTaskMap[category];
-      const completed = taskList.filter((task) => Boolean(dayEntry?.[category].completed[task.id])).length;
-      const total = taskList.length;
-
-      return {
-        category,
-        total,
-        completed,
-        percent: total === 0 ? 0 : (completed / total) * 100,
-      };
-    });
-  }, [categoryTaskMap, dayEntry]);
+  }, [categoryTasks, selectedDate, selectedEntry]);
 
   const progressStats = useMemo(() => {
-    const dates = Object.keys(allEntries).sort();
-
-    const getDatePercent = (date: string) => {
+    const getDateCompletion = (date: string) => {
       const entry = allEntries[date] ?? createEmptyDayEntry(date);
-      let total = 0;
-      let done = 0;
-      (Object.keys(CATEGORY_META) as TaskCategory[]).forEach((category) => {
-        const taskList = tasks.filter((task) => task.category === category);
-        total += taskList.length;
-        done += taskList.filter((task) => Boolean(entry[category].completed[task.id])).length;
-      });
-      return total === 0 ? 0 : (done / total) * 100;
+      return getDailyPercent(entry, tasks);
     };
 
-    let currentStreak = 0;
-    let cursor = new Date(selectedDate);
-
+    let streak = 0;
+    let cursor = new Date();
     while (true) {
-      const key = toISODate(cursor);
-      const pct = getDatePercent(key);
-      if (pct >= 70) {
-        currentStreak += 1;
+      const iso = toISODate(cursor);
+      if (getDateCompletion(iso) >= 70) {
+        streak += 1;
         cursor = addDays(cursor, -1);
       } else {
         break;
@@ -345,123 +278,103 @@ function App() {
     }
 
     let bestStreak = 0;
-    let tempStreak = 0;
-    const reversed = [...dates].sort((a, b) => (a < b ? -1 : 1));
-    reversed.forEach((date) => {
-      if (getDatePercent(date) >= 70) {
-        tempStreak += 1;
-        bestStreak = Math.max(bestStreak, tempStreak);
+    let running = 0;
+    const sortedDates = Object.keys(allEntries).sort();
+    for (const iso of sortedDates) {
+      if (getDateCompletion(iso) >= 70) {
+        running += 1;
+        bestStreak = Math.max(bestStreak, running);
       } else {
-        tempStreak = 0;
-      }
-    });
-
-    const today = parseISODate(selectedDate);
-    const startOfWeek = addDays(today, 1 - today.getDay() || -6);
-    const last7Days = Array.from({ length: 7 }, (_, index) => toISODate(addDays(startOfWeek, index)));
-    const weeklyAverage = last7Days.reduce((total, date) => total + getDatePercent(date), 0) / last7Days.length;
-
-    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-    const monthDates = [] as string[];
-    for (let i = 0; i < 31; i += 1) {
-      const date = addDays(monthStart, i);
-      if (date.getMonth() === today.getMonth()) {
-        monthDates.push(toISODate(date));
+        running = 0;
       }
     }
-    const monthlyAverage =
+
+    const last7 = Array.from({ length: 7 }, (_, index) => {
+      const date = addDays(new Date(), - (6 - index));
+      return toISODate(date);
+    });
+    const weekly =
+      last7.reduce((total, iso) => total + getDateCompletion(iso), 0) / last7.length;
+
+    const monthDates = [] as string[];
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    for (let i = 0; i < 32; i += 1) {
+      const date = addDays(monthStart, i);
+      if (date.getMonth() === new Date().getMonth()) monthDates.push(toISODate(date));
+    }
+    const monthly =
       monthDates.length === 0
         ? 0
-        : monthDates.reduce((total, date) => total + getDatePercent(date), 0) / monthDates.length;
+        : monthDates.reduce((total, iso) => total + getDateCompletion(iso), 0) / monthDates.length;
 
-    const workoutSuccessDays = Object.keys(allEntries).filter((date) => {
-      const entry = allEntries[date];
-      const workoutTasks = tasks.filter((task) => task.category === 'workout');
-      const done = workoutTasks.filter((task) => Boolean(entry.workout.completed[task.id])).length;
-      return workoutTasks.length > 0 && (done / workoutTasks.length) * 100 >= 80;
+    const workoutDays = Object.values(allEntries).filter((entry) => {
+      const total = categoryTasks.workout.length;
+      if (total === 0) return false;
+      const done = categoryTasks.workout.filter((task) => Boolean(entry.workout.completed[task.id])).length;
+      return clampPercent((done / total) * 100) >= 80;
     }).length;
 
-    const dietSuccessDays = Object.keys(allEntries).filter((date) => {
-      const entry = allEntries[date];
-      const dietTasks = tasks.filter((task) => task.category === 'diet');
-      const done = dietTasks.filter((task) => Boolean(entry.diet.completed[task.id])).length;
-      return dietTasks.length > 0 && (done / dietTasks.length) * 100 >= 80;
+    const dietDays = Object.values(allEntries).filter((entry) => {
+      const total = categoryTasks.diet.length;
+      if (total === 0) return false;
+      const done = categoryTasks.diet.filter((task) => Boolean(entry.diet.completed[task.id])).length;
+      return clampPercent((done / total) * 100) >= 80;
     }).length;
 
-    const personalSuccessDays = Object.keys(allEntries).filter((date) => {
-      const entry = allEntries[date];
-      const personalTasks = tasks.filter((task) => task.category === 'personal');
-      const done = personalTasks.filter((task) => Boolean(entry.personal.completed[task.id])).length;
-      return personalTasks.length > 0 && (done / personalTasks.length) * 100 >= 80;
+    const personalDays = Object.values(allEntries).filter((entry) => {
+      const total = categoryTasks.personal.length;
+      if (total === 0) return false;
+      const done = categoryTasks.personal.filter((task) => Boolean(entry.personal.completed[task.id])).length;
+      return clampPercent((done / total) * 100) >= 80;
     }).length;
 
     return {
-      currentStreak,
+      currentStreak: streak,
       bestStreak,
-      weeklyAverage,
-      monthlyAverage,
-      workoutSuccessDays,
-      dietSuccessDays,
-      personalSuccessDays,
+      weeklyAverage: weekly,
+      monthlyAverage: monthly,
+      workoutDays,
+      dietDays,
+      personalDays,
     };
-  }, [allEntries, selectedDate, tasks]);
-
-  const selectedSummary = useMemo(() => {
-    const entry = dayEntry ?? createEmptyDayEntry(selectedDate);
-    return {
-      workout: {
-        completed: categoryTaskMap.workout.filter((task) => Boolean(entry.workout.completed[task.id])).length,
-        total: categoryTaskMap.workout.length,
-        steps: safeNumber(entry.workout.steps),
-        distance: safeNumber(entry.workout.distance),
-        calories: safeNumber(entry.workout.caloriesBurned),
-      },
-      diet: {
-        completed: categoryTaskMap.diet.filter((task) => Boolean(entry.diet.completed[task.id])).length,
-        total: categoryTaskMap.diet.length,
-        calories: safeNumber(entry.diet.caloriesConsumed),
-        protein: safeNumber(entry.diet.protein),
-      },
-      personal: {
-        completed: categoryTaskMap.personal.filter((task) => Boolean(entry.personal.completed[task.id])).length,
-        total: categoryTaskMap.personal.length,
-      },
-    };
-  }, [categoryTaskMap, dayEntry, selectedDate]);
-
-  if (isLoading) {
-    return <div className="loading-screen">Loading tracker...</div>;
-  }
+  }, [allEntries, categoryTasks, tasks]);
 
   const renderTaskList = (category: TaskCategory) => {
-    const taskList = categoryTaskMap[category];
-    const entry = dayEntry ?? createEmptyDayEntry(selectedDate);
+    const tasksForCategory = categoryTasks[category];
+    const entry = selectedEntry ?? createEmptyDayEntry(selectedDate);
 
     return (
       <section className="category-panel" key={category}>
         <div className="panel-header">
           <div className="panel-title-wrap">
-            <span className={`category-icon ${category}`}>{CATEGORY_META[category].icon}</span>
+            <span className="category-icon">{CATEGORY_META[category].icon}</span>
             <div>
               <h3>{CATEGORY_META[category].title}</h3>
               <p>
-                {taskList.filter((task) => Boolean(entry[category].completed[task.id])).length}/{taskList.length} complete
+                {tasksForCategory.filter((task) => Boolean(entry[category].completed[task.id])).length}/
+                {tasksForCategory.length} complete
               </p>
             </div>
           </div>
-          <button className="add-button" onClick={() => openAddTaskModal(category)}>+ Add</button>
+          <button className="add-button" onClick={() => {
+            setEditingTaskId(null);
+            setTaskDraft({ name: '', category, target: '' });
+            setModalOpen(true);
+          }}>
+            + Add
+          </button>
         </div>
 
         <div className="task-list">
-          {taskList.map((task) => {
+          {tasksForCategory.map((task) => {
             const checked = Boolean(entry[category].completed[task.id]);
-
             return (
               <div className="task-row" key={task.id}>
                 <button
+                  type="button"
                   className={`check-toggle ${checked ? 'checked' : ''}`}
-                  aria-label={`Toggle ${task.name}`}
                   onClick={() => toggleTask(category, task.id)}
+                  aria-label={`Toggle ${task.name}`}
                 >
                   {checked ? '✓' : ''}
                 </button>
@@ -473,8 +386,23 @@ function App() {
 
                 {!task.isDefault ? (
                   <div className="task-actions">
-                    <button onClick={() => openAddTaskModal(category, task)}>Edit</button>
-                    <button onClick={() => handleDeleteTask(task.id)}>Delete</button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingTaskId(task.id);
+                        setTaskDraft({
+                          name: task.name,
+                          category: task.category,
+                          target: task.target ?? '',
+                        });
+                        setModalOpen(true);
+                      }}
+                    >
+                      Edit
+                    </button>
+                    <button type="button" onClick={() => handleDeleteTask(task.id)}>
+                      Delete
+                    </button>
                   </div>
                 ) : null}
               </div>
@@ -484,40 +412,31 @@ function App() {
 
         {category === 'workout' ? (
           <div className="metric-panel">
-            <div className="field-group">
-              <label>Total calories burned</label>
-              <input
-                type="number"
-                value={entry.workout.caloriesBurned ?? 0}
-                onChange={(event) => updateSelectedDay('workout', { caloriesBurned: safeNumber(event.target.value) })}
-              />
-            </div>
-
-            <div className="field-group">
-              <label>Total steps</label>
-              <input
-                type="number"
-                value={entry.workout.steps ?? 0}
-                onChange={(event) => updateSelectedDay('workout', { steps: safeNumber(event.target.value) })}
-              />
-            </div>
-
-            <div className="field-group">
-              <label>Total distance (km)</label>
-              <input
-                type="number"
-                value={entry.workout.distance ?? 0}
-                step="0.1"
-                onChange={(event) => updateSelectedDay('workout', { distance: safeNumber(event.target.value) })}
-              />
-            </div>
+            {[
+              ['Total calories burned', 'caloriesBurned', 'number'],
+              ['Total steps', 'steps', 'number'],
+              ['Total distance', 'distance', 'number'],
+            ].map(([label, key, type]) => (
+              <div className="field-group" key={label as string}>
+                <label>{label as string}</label>
+                <input
+                  type={type as string}
+                  value={Number((entry[category] as any)[key as keyof CategoryEntry] ?? 0)}
+                  onChange={(event) =>
+                    updateSelectedEntry(category, {
+                      [key]: safeNumber(event.target.value),
+                    } as Partial<CategoryEntry>)
+                  }
+                />
+              </div>
+            ))}
 
             <div className="field-group notes-field">
-              <label>Notes</label>
+              <label>Workout notes</label>
               <textarea
-                value={entry.workout.notes ?? ''}
-                onChange={(event) => updateSelectedDay('workout', { notes: event.target.value })}
-                placeholder="Workout reflection or additional notes..."
+                value={entry.workout.notes}
+                onChange={(event) => updateSelectedEntry('workout', { notes: event.target.value })}
+                placeholder="Workout reflection..."
               />
             </div>
           </div>
@@ -529,26 +448,26 @@ function App() {
               <label>Total calories consumed</label>
               <input
                 type="number"
-                value={entry.diet.caloriesConsumed ?? 0}
-                onChange={(event) => updateSelectedDay('diet', { caloriesConsumed: safeNumber(event.target.value) })}
+                value={entry.diet.caloriesConsumed}
+                onChange={(event) => updateSelectedEntry('diet', { caloriesConsumed: safeNumber(event.target.value) })}
               />
             </div>
 
             <div className="field-group">
-              <label>Total protein</label>
+              <label>Total protein consumed</label>
               <input
                 type="number"
-                value={entry.diet.protein ?? 0}
-                onChange={(event) => updateSelectedDay('diet', { protein: safeNumber(event.target.value) })}
+                value={entry.diet.protein}
+                onChange={(event) => updateSelectedEntry('diet', { protein: safeNumber(event.target.value) })}
               />
             </div>
 
             <div className="field-group notes-field">
-              <label>Nutrition notes</label>
+              <label>Diet notes</label>
               <textarea
-                value={entry.diet.notes ?? ''}
-                onChange={(event) => updateSelectedDay('diet', { notes: event.target.value })}
-                placeholder="Meals, macros, or diet notes..."
+                value={entry.diet.notes}
+                onChange={(event) => updateSelectedEntry('diet', { notes: event.target.value })}
+                placeholder="Meals, calories, protein, notes..."
               />
             </div>
           </div>
@@ -559,9 +478,9 @@ function App() {
             <div className="field-group notes-field">
               <label>Daily notes</label>
               <textarea
-                value={entry.personal.notes ?? ''}
-                onChange={(event) => updateSelectedDay('personal', { notes: event.target.value })}
-                placeholder="Focus, reflection, or personal commitments..."
+                value={entry.personal.notes}
+                onChange={(event) => updateSelectedEntry('personal', { notes: event.target.value })}
+                placeholder="Reflection, focus, or personal notes..."
               />
             </div>
           </div>
@@ -570,10 +489,17 @@ function App() {
     );
   };
 
+  const dailyCompletion =
+    tasks.length === 0
+      ? 0
+      : (tasks.filter((task) => Boolean((selectedEntry ?? createEmptyDayEntry(selectedDate))[task.category].completed[task.id])).length /
+          tasks.length) *
+        100;
+
   return (
     <div className="app-shell">
-      <div className="ambient ambient-one" />
-      <div className="ambient ambient-two" />
+      <div className="aurora aurora-one" />
+      <div className="aurora aurora-two" />
 
       <header className="topbar">
         <div>
@@ -582,11 +508,15 @@ function App() {
         </div>
 
         <div className="date-controls">
-          <button onClick={() => setSelectedDate(toISODate(addDays(parseISODate(selectedDate), -1)))}>← Previous</button>
-          <button className="today-button" onClick={() => setSelectedDate(today)}>
+          <button type="button" onClick={() => setSelectedDate(toISODate(addDays(parseISODate(selectedDate), -1)))}>
+            ← Previous
+          </button>
+          <button type="button" className="today-button" onClick={() => setSelectedDate(today)}>
             Today
           </button>
-          <button onClick={() => setSelectedDate(toISODate(addDays(parseISODate(selectedDate), 1)))}>Next →</button>
+          <button type="button" onClick={() => setSelectedDate(toISODate(addDays(parseISODate(selectedDate), 1)))}>
+            Next →
+          </button>
         </div>
       </header>
 
@@ -594,39 +524,44 @@ function App() {
         <section className="summary-block">
           <div className="date-banner">
             <div>
-              <small>{formatMonthText(selectedDate)}</small>
+              <small>{formatMonth(selectedDate)}</small>
               <h2>
-                {formatDateText(selectedDate)} {new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(parseISODate(selectedDate))}
+                {formatDay(selectedDate)} {new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(parseISODate(selectedDate))}
               </h2>
             </div>
-            {isSameDate(selectedDate, today) ? <span className="today-pill">Today</span> : null}
+            {isSameDay(selectedDate, today) ? <span className="today-pill">Today</span> : null}
           </div>
 
           <div className="summary-grid">
             <div className="summary-card mega">
               <span>Daily completion</span>
-              <strong>{Math.round(dailyCompletion.percent)}%</strong>
+              <strong>{Math.round(dailyCompletion)}%</strong>
               <small>
-                {dailyCompletion.done}/{dailyCompletion.total} tasks complete
+                {tasks.filter((task) => Boolean((selectedEntry ?? createEmptyDayEntry(selectedDate))[task.category].completed[task.id])).length}/
+                {tasks.length} tasks complete
               </small>
             </div>
 
             <div className="summary-card">
               <span>Workout</span>
-              <strong>{Math.round(percent(selectedSummary.workout.completed, selectedSummary.workout.total))}%</strong>
+              <strong>{Math.round((selectedSummary.workout.done / Math.max(1, selectedSummary.workout.total)) * 100)}%</strong>
               <small>{selectedSummary.workout.steps.toLocaleString()} steps</small>
             </div>
 
             <div className="summary-card">
               <span>Diet</span>
-              <strong>{Math.round(percent(selectedSummary.diet.completed, selectedSummary.diet.total))}%</strong>
-              <small>{selectedSummary.diet.calories} cal • {selectedSummary.diet.protein}g protein</small>
+              <strong>{Math.round((selectedSummary.diet.done / Math.max(1, selectedSummary.diet.total)) * 100)}%</strong>
+              <small>
+                {selectedSummary.diet.calories} cal · {selectedSummary.diet.protein}g protein
+              </small>
             </div>
 
             <div className="summary-card">
               <span>Personal</span>
-              <strong>{Math.round(percent(selectedSummary.personal.completed, selectedSummary.personal.total))}%</strong>
-              <small>{selectedSummary.personal.completed}/{selectedSummary.personal.total} complete</small>
+              <strong>{Math.round((selectedSummary.personal.done / Math.max(1, selectedSummary.personal.total)) * 100)}%</strong>
+              <small>
+                {selectedSummary.personal.done}/{selectedSummary.personal.total} complete
+              </small>
             </div>
           </div>
         </section>
@@ -655,16 +590,16 @@ function App() {
               <strong>{Math.round(progressStats.monthlyAverage)}%</strong>
             </div>
             <div className="stat-card">
-              <span>Workout success days</span>
-              <strong>{progressStats.workoutSuccessDays}</strong>
+              <span>Total workout days</span>
+              <strong>{progressStats.workoutDays}</strong>
             </div>
             <div className="stat-card">
-              <span>Diet success days</span>
-              <strong>{progressStats.dietSuccessDays}</strong>
+              <span>Total diet-success days</span>
+              <strong>{progressStats.dietDays}</strong>
             </div>
             <div className="stat-card">
-              <span>Personal success days</span>
-              <strong>{progressStats.personalSuccessDays}</strong>
+              <span>Total personal-success days</span>
+              <strong>{progressStats.personalDays}</strong>
             </div>
           </div>
         </section>
@@ -677,9 +612,15 @@ function App() {
             </div>
 
             <div className="week-nav">
-              <button onClick={() => setSelectedDate(toISODate(addDays(parseISODate(selectedDate), -7)))}>Previous week</button>
-              <button className="today-button" onClick={() => setSelectedDate(today)}>Current week</button>
-              <button onClick={() => setSelectedDate(toISODate(addDays(parseISODate(selectedDate), 7)))}>Next week</button>
+              <button type="button" onClick={() => setSelectedDate(toISODate(addDays(parseISODate(selectedDate), -7)))}>
+                Previous week
+              </button>
+              <button type="button" className="today-button" onClick={() => setSelectedDate(today)}>
+                Current week
+              </button>
+              <button type="button" onClick={() => setSelectedDate(toISODate(addDays(parseISODate(selectedDate), 7)))}>
+                Next week
+              </button>
             </div>
           </div>
 
@@ -687,44 +628,46 @@ function App() {
             <div className="tracker-header-row">
               <div className="task-label-header">Task</div>
               {weekDates.map((date) => (
-                <div
+                <button
+                  type="button"
                   key={date}
-                  className={`day-cell ${isSameDate(date, today) ? 'today' : ''} ${isSameDate(date, selectedDate) ? 'selected' : ''}`}
+                  className={`day-cell ${isSameDay(date, today) ? 'today' : ''} ${isSameDay(date, selectedDate) ? 'selected' : ''}`}
                   onClick={() => setSelectedDate(date)}
                 >
-                  <span>{formatMonthText(date)}</span>
-                  <strong>{formatDateText(date)}</strong>
-                  <small>{formatWeekdayShort(date)}</small>
-                </div>
+                  <span>{formatMonth(date)}</span>
+                  <strong>{formatDay(date)}</strong>
+                  <small>{formatWeekday(date)}</small>
+                </button>
               ))}
             </div>
 
-            {(Object.keys(CATEGORY_META) as TaskCategory[]).map((category) => (
+            {CATEGORY_ORDER.map((category) => (
               <div className="tracker-category" key={category}>
                 <div className="category-header-row">
                   <div className="category-title">{CATEGORY_META[category].title}</div>
                   {weekDates.map((date) => (
                     <div key={`${category}-${date}`} className="mini-date-pill">
-                      {weekEntries[date]?.[category] ? '•' : ''}
+                      {weekEntries[date] ? '•' : ''}
                     </div>
                   ))}
                 </div>
 
-                {categoryTaskMap[category].map((task) => (
+                {categoryTasks[category].map((task) => (
                   <div className="tracker-task-row" key={task.id}>
                     <div className="task-name-block">
                       <span>{task.name}</span>
                     </div>
 
                     {weekDates.map((date) => {
-                      const dayEntryForDate = weekEntries[date] ?? createEmptyDayEntry(date);
-                      const checked = Boolean(dayEntryForDate[category].completed[task.id]);
+                      const entry = weekEntries[date] ?? createEmptyDayEntry(date);
+                      const checked = Boolean(entry[category].completed[task.id]);
 
                       return (
                         <button
+                          type="button"
                           key={`${task.id}-${date}`}
-                          className={`day-toggle ${checked ? 'checked' : ''} ${isSameDate(date, today) ? 'today' : ''}`}
-                          onClick={() => toggleTaskInWeek(date, category, task.id)}
+                          className={`day-toggle ${checked ? 'checked' : ''} ${isSameDay(date, today) ? 'today' : ''}`}
+                          onClick={() => toggleWeekTask(date, category, task.id)}
                         >
                           {checked ? '✓' : ''}
                         </button>
@@ -737,9 +680,7 @@ function App() {
           </div>
         </section>
 
-        <section className="daily-grid">
-          {(Object.keys(CATEGORY_META) as TaskCategory[]).map((category) => renderTaskList(category))}
-        </section>
+        <section className="daily-grid">{CATEGORY_ORDER.map((category) => renderTaskList(category))}</section>
       </main>
 
       {modalOpen ? (
@@ -747,7 +688,7 @@ function App() {
           <div className="task-modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
               <h3>{editingTaskId ? 'Edit task' : 'Add custom task'}</h3>
-              <button className="close-button" onClick={() => setModalOpen(false)}>
+              <button type="button" className="close-button" onClick={() => setModalOpen(false)}>
                 ×
               </button>
             </div>
@@ -759,7 +700,7 @@ function App() {
                   type="text"
                   value={taskDraft.name}
                   onChange={(event) => setTaskDraft((current) => ({ ...current, name: event.target.value }))}
-                  placeholder="Enter task name"
+                  placeholder="Task name"
                 />
               </label>
 
@@ -786,16 +727,16 @@ function App() {
                   type="text"
                   value={taskDraft.target}
                   onChange={(event) => setTaskDraft((current) => ({ ...current, target: event.target.value }))}
-                  placeholder="e.g. 10 minutes, 5 km, no sugar"
+                  placeholder="e.g. 10 minutes or 5 km"
                 />
               </label>
             </div>
 
             <div className="modal-actions">
-              <button className="secondary-button" onClick={() => setModalOpen(false)}>
+              <button type="button" className="secondary-button" onClick={() => setModalOpen(false)}>
                 Cancel
               </button>
-              <button className="primary-button" onClick={handleSaveTask}>
+              <button type="button" className="primary-button" onClick={handleTaskSave}>
                 {editingTaskId ? 'Save changes' : 'Add task'}
               </button>
             </div>
